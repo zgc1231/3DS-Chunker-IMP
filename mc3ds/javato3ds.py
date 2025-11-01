@@ -58,6 +58,13 @@ def _load_inverse_block_map() -> dict[str, tuple[int, int]]:
     with mapping_path.open("r", encoding="utf-8") as blocks_file:
         raw_blocks = json.load(blocks_file)
 
+
+
+def _load_inverse_block_map() -> dict[str, tuple[int, int]]:
+    mapping_path = Path(__file__).parent / "data" / "blocks.json"
+    with mapping_path.open("r", encoding="utf-8") as blocks_file:
+        raw_blocks = json.load(blocks_file)
+
     inverse: dict[str, tuple[int, int]] = {}
     for block_key, state in raw_blocks["blocks"].items():
         block_id, meta_id = (int(part) for part in block_key.split(":"))
@@ -228,6 +235,7 @@ class RegionCache:
     def get_chunk(
         self, chunk_x: int, chunk_z: int, dimension: int
     ) -> Chunk | nbt.NBTFile | nbt.TAG_Compound | None:
+    def get_chunk(self, chunk_x: int, chunk_z: int, dimension: int) -> Chunk | None:
         region_x = chunk_x >> 5
         region_z = chunk_z >> 5
         cache_key = (region_x, region_z, dimension)
@@ -263,6 +271,10 @@ class RegionCache:
 
 def _build_flat_map(
     chunk: Chunk | nbt.NBTFile | nbt.TAG_Compound,
+
+
+def _build_flat_map(
+    chunk: Chunk,
     chunk_x: int,
     chunk_z: int,
     inverse_block_map: dict[str, tuple[int, int]],
