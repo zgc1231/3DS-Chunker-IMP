@@ -1,8 +1,11 @@
 import os
+import struct
 from abc import abstractmethod
+from dataclasses import dataclass
 from io import BytesIO
-from typing import Any, Iterable
 from pathlib import Path
+from typing import Any, Iterable
+from types import SimpleNamespace
 import zlib
 import re
 import logging
@@ -57,20 +60,134 @@ class BaseParser:
         self._stream.seek(self._offset + position)
 
 
+@dataclass
+class SimpleChunkParameters:
+    unknown0: int
+    unknown1: int
+
+
+@dataclass
+class TemplatePosition:
+    x: int
+    z: int
+    dimension: int
+
+
+@dataclass
+class TemplateIndexEntry:
+    position: TemplatePosition
+    slot: int
+    subfile: int
+    const_combined: int
+    reserved: int
+    parameters: SimpleChunkParameters
+    constant2: int
+
+    @property
+    def constant0(self) -> int:
+        return self.const_combined
+
+    @property
+    def constant1(self) -> int:
+        return self.reserved
+
+
 class Index(BaseParser):
     def _reload_data(self) -> None:
         self._seek(0)
-        self._data = parser.Index(self._stream)
-        assert self._data.constant0 == 0x2
-        # assert self._data.constant1 == 0x80
+        header_bytes = self._stream.read(4)
+        if len(header_bytes) < 4:
+            raise ValueError("index.cdb is too short to contain a header")
+        (first_value,) = struct.unpack("<I", header_bytes)
+        self._seek(0)
+        if first_value == 0x2:
+            self._data = parser.Index(self._stream)
+            assert self._data.constant0 == 0x2
+            self._entries = list(self._data.entries)
+            self._pointers = list(self._data.pointers)
+            return
+
+        self._data = self._parse_template_index()
+        self._entries = list(self._data.entries)
+        self._pointers = []
+
+    def _parse_template_index(self) -> SimpleNamespace:
+        header = self._stream.read(32)
+        if len(header) != 32:
+            raise ValueError("template index.cdb header is truncated")
+        (
+            version,
+            entry_count,
+            unknown0,
+            entry_size,
+            constant0,
+            constant1,
+            extra0,
+            extra1,
+        ) = struct.unpack("<8I", header)
+        if version != 1:
+            raise ValueError(f"unexpected index version {version}")
+        if entry_size != 16:
+            raise ValueError(f"unexpected index entry size {entry_size}")
+        if constant0 != 0x2:
+            raise ValueError(f"unexpected constant0 value 0x{constant0:08X}")
+        if constant1 != 0x80:
+            raise ValueError(f"unexpected constant1 value 0x{constant1:08X}")
+
+        entries: list[TemplateIndexEntry] = []
+        for _ in range(entry_count):
+            entry_bytes = self._stream.read(entry_size)
+            if len(entry_bytes) != entry_size:
+                raise ValueError("template index.cdb entries are truncated")
+            (
+                packed_position,
+                slot,
+                subfile,
+                const_combined,
+                reserved,
+                param0,
+                param1,
+                constant2,
+            ) = struct.unpack("<IHHHHbbH", entry_bytes)
+            position = TemplatePosition(
+                x=packed_position & 0x3FFF,
+                z=(packed_position >> 14) & 0x3FFF,
+                dimension=(packed_position >> 28) & 0xF,
+            )
+            parameters = SimpleChunkParameters(param0, param1)
+            entries.append(
+                TemplateIndexEntry(
+                    position=position,
+                    slot=slot,
+                    subfile=subfile,
+                    const_combined=const_combined,
+                    reserved=reserved,
+                    parameters=parameters,
+                    constant2=constant2,
+                )
+            )
+
+        return SimpleNamespace(
+            version=version,
+            constant0=constant0,
+            entryCount=entry_count,
+            unknown0=unknown0,
+            entrySize=entry_size,
+            pointerCount=0,
+            constant1=constant1,
+            extra0=extra0,
+            extra1=extra1,
+            pointers=tuple(),
+            entries=tuple(entries),
+        )
 
     @property
     def pointers(self):
-        return self._data.pointers
+        return self._pointers
 
     @property
     def entries(self):
-        return self._data.entries
+        return self._entries
 
 
 class Subfile(BaseParser):
@@ -510,9 +627,14 @@ class World:
         self.entries = {}
         for entry in self._index.entries:
             slot = entry.slot
-            assert entry.constant0 == 0x20FF
-            if entry.constant1 != 0xA:
-                logger.error(f"!!! not constant 0x{entry.constant1:X} !!!")
+            if entry.constant0 not in (0x20FF, 0x200A, 0x2014):
+                logger.warning(
+                    "unexpected index constant0 value 0x%X for slot %d", entry.constant0, slot
+                )
+            if entry.constant1 not in (0xA, 0x0):
+                logger.warning(
+                    "unexpected index constant1 value 0x%X for slot %d", entry.constant1, slot
+                )
             assert entry.constant2 == 0x8000
             if slot not in self.cdb.keys():
                 pass  # logger.debug(f"N {entry}")
