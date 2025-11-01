@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterator
 
 from anvil import Chunk, ChunkNotFound, Region
+from nbt import nbt
 
 from .classes import World, parse_position
 
@@ -57,6 +58,13 @@ def _load_inverse_block_map() -> dict[str, tuple[int, int]]:
     with mapping_path.open("r", encoding="utf-8") as blocks_file:
         raw_blocks = json.load(blocks_file)
 
+
+
+def _load_inverse_block_map() -> dict[str, tuple[int, int]]:
+    mapping_path = Path(__file__).parent / "data" / "blocks.json"
+    with mapping_path.open("r", encoding="utf-8") as blocks_file:
+        raw_blocks = json.load(blocks_file)
+
     inverse: dict[str, tuple[int, int]] = {}
     for block_key, state in raw_blocks["blocks"].items():
         block_id, meta_id = (int(part) for part in block_key.split(":"))
@@ -87,11 +95,146 @@ def _load_inverse_block_map() -> dict[str, tuple[int, int]]:
     return inverse
 
 
+def _tag_get(tag: nbt.TAG_Compound | nbt.NBTFile | None, key: str):
+    if tag is None:
+        return None
+    try:
+        return tag[key]
+    except KeyError:
+        return None
+
+
+def _tag_value(tag, default=None):
+    if tag is None:
+        return default
+    return getattr(tag, "value", tag)
+
+
+def _compound_to_dict(tag) -> dict[str, object]:
+    if not isinstance(tag, nbt.TAG_Compound):
+        return {}
+    props: dict[str, object] = {}
+    for child in tag.tags:
+        props[child.name] = _tag_value(child)
+    return props
+
+
+def _decode_block_state_indices(data_tag, palette_size: int, value_count: int = 4096) -> list[int]:
+    if palette_size <= 1:
+        return [0] * value_count
+    if data_tag is None:
+        return [0] * value_count
+
+    raw_values = getattr(data_tag, "value", [])
+    if not raw_values:
+        return [0] * value_count
+
+    bits_per_block = max(4, (palette_size - 1).bit_length())
+    mask = (1 << bits_per_block) - 1
+
+    results: list[int] = []
+    bit_buffer = 0
+    bits_in_buffer = 0
+    iterator = iter(raw_values)
+
+    for _ in range(value_count):
+        while bits_in_buffer < bits_per_block:
+            next_long = next(iterator, 0)
+            bit_buffer |= (next_long & 0xFFFFFFFFFFFFFFFF) << bits_in_buffer
+            bits_in_buffer += 64
+        results.append(bit_buffer & mask)
+        bit_buffer >>= bits_per_block
+        bits_in_buffer -= bits_per_block
+
+    return results
+
+
+def _build_flat_map_from_nbt(
+    chunk: nbt.NBTFile | nbt.TAG_Compound,
+    chunk_x: int,
+    chunk_z: int,
+    inverse_block_map: dict[str, tuple[int, int]],
+    max_height: int,
+) -> tuple[dict[tuple[int, int, int], tuple[int, int]], set[str]]:
+    flat_map: dict[tuple[int, int, int], tuple[int, int]] = {}
+    missing: set[str] = set()
+
+    level = chunk
+    if isinstance(level, (nbt.NBTFile, nbt.TAG_Compound)) and "Level" in level:
+        level = level["Level"]
+
+    sections = _tag_get(level, "sections") or _tag_get(level, "Sections")
+    if sections is None:
+        return flat_map, missing
+
+    base_x = chunk_x * 16
+    base_z = chunk_z * 16
+
+    for section in sections:
+        section_y_tag = _tag_get(section, "Y") or _tag_get(section, "y")
+        if section_y_tag is None:
+            continue
+        section_y = int(_tag_value(section_y_tag, 0))
+        section_min_y = section_y * 16
+        section_max_y = section_min_y + 16
+        if section_max_y <= 0 or section_min_y >= max_height:
+            continue
+
+        block_states_container = _tag_get(section, "block_states")
+        palette_tag = _tag_get(block_states_container, "palette")
+        data_tag = _tag_get(block_states_container, "data")
+
+        if palette_tag is None:
+            palette_tag = _tag_get(section, "Palette")
+        if data_tag is None:
+            data_tag = _tag_get(section, "BlockStates")
+
+        if palette_tag is None:
+            continue
+
+        palette: list[tuple[int, int] | None] = []
+        for entry in palette_tag:
+            name = str(_tag_value(_tag_get(entry, "Name"), "minecraft:air"))
+            props = _compound_to_dict(_tag_get(entry, "Properties"))
+            canonical = _format_block_state(name, _canonicalise_properties(props))
+            block_id = inverse_block_map.get(canonical)
+            if block_id is None:
+                missing.add(canonical)
+            palette.append(block_id)
+
+        palette_size = len(palette)
+        if palette_size == 0:
+            continue
+
+        indices = _decode_block_state_indices(data_tag, palette_size)
+        for idx, palette_index in enumerate(indices):
+            if palette_index >= palette_size:
+                continue
+            block_id = palette[palette_index]
+            if block_id is None or block_id == (0, 0):
+                continue
+
+            local_x = idx & 0xF
+            local_z = (idx >> 4) & 0xF
+            local_y = (idx >> 8) & 0xF
+            world_y = section_min_y + local_y
+            if world_y < 0 or world_y >= max_height:
+                continue
+            world_x = base_x + local_x
+            world_z = base_z + local_z
+            flat_map[(world_x, world_y, world_z)] = block_id
+
+    return flat_map, missing
+
+
 class RegionCache:
     def __init__(self, world: Path) -> None:
         self.world = Path(world)
         self._cache: dict[tuple[int, int, int], Region] = {}
 
+    def get_chunk(
+        self, chunk_x: int, chunk_z: int, dimension: int
+    ) -> Chunk | nbt.NBTFile | nbt.TAG_Compound | None:
     def get_chunk(self, chunk_x: int, chunk_z: int, dimension: int) -> Chunk | None:
         region_x = chunk_x >> 5
         region_z = chunk_z >> 5
@@ -114,6 +257,20 @@ class RegionCache:
             return region.get_chunk(chunk_x, chunk_z)
         except ChunkNotFound:
             return None
+        except KeyError:
+            try:
+                chunk_nbt = region.chunk_data(chunk_x, chunk_z)
+            except ChunkNotFound:
+                return None
+            if chunk_nbt is None:
+                return None
+            if isinstance(chunk_nbt, nbt.NBTFile) and "Level" in chunk_nbt:
+                return chunk_nbt["Level"]
+            return chunk_nbt
+
+
+def _build_flat_map(
+    chunk: Chunk | nbt.NBTFile | nbt.TAG_Compound,
 
 
 def _build_flat_map(
@@ -123,6 +280,9 @@ def _build_flat_map(
     inverse_block_map: dict[str, tuple[int, int]],
     max_height: int = 128,
 ) -> tuple[dict[tuple[int, int, int], tuple[int, int]], set[str]]:
+    if not isinstance(chunk, Chunk):
+        return _build_flat_map_from_nbt(chunk, chunk_x, chunk_z, inverse_block_map, max_height)
+
     flat_map: dict[tuple[int, int, int], tuple[int, int]] = {}
     missing: set[str] = set()
     base_x = chunk_x * 16
