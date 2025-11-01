@@ -530,7 +530,9 @@ class DBDirectory:
 
     def __getitem__(self, key: int) -> Any:
         path = self._files[key]
-        return self._process(open(path, "rb"))
+        with open(path, "rb") as stream:
+            data = stream.read()
+        return self._process(BytesIO(data))
 
 
 class CDBDirectory(DBDirectory):
