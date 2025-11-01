@@ -4,6 +4,7 @@ from pathlib import Path
 import importlib.resources
 import shutil
 import json
+import logging
 
 from . import data
 
@@ -65,6 +66,11 @@ logger = logging.getLogger(__name__)
     default=Path.cwd() / "Converted",
 )
 @click.option(
+    "--java-world",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Path to the Java world to import when using --java-to-3ds.",
+)
+@click.option(
     "--delete-out",
     is_flag=True,
     help="Permanently delete the output and world folders, and their contents (make sure they're the right folders!)",
@@ -74,6 +80,7 @@ def main(
     out: Path,
     mode: str,
     world_out: Path,
+    java_world: Path | None,
     delete_out: bool = False,
 ) -> None:
     start_time = time.time()
@@ -168,7 +175,10 @@ def main(
                         #     print(index, subchunk_index)
             logger.debug(f"extracted region {number:d}!")
     elif mode == "javato3ds":
-        convert_java(path, world_out, delete_out)
+        if java_world is None:
+            logger.error("--java-world must be provided when using --java-to-3ds")
+            sys.exit(1)
+        convert_java(path, java_world, delete_out)
 
 
 if __name__ == "__main__":
