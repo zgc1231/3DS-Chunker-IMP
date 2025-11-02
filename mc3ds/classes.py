@@ -82,6 +82,7 @@ class TemplateIndexEntry:
     reserved: int
     parameters: SimpleChunkParameters
     constant2: int
+    is_placeholder: bool = False
 
     @property
     def constant0(self) -> int:
@@ -135,10 +136,33 @@ class Index(BaseParser):
             raise ValueError(f"unexpected constant1 value 0x{constant1:08X}")
 
         entries: list[TemplateIndexEntry] = []
+
+        def append_default_entry() -> None:
+            entries.append(
+                TemplateIndexEntry(
+                    position=TemplatePosition(x=0, z=0, dimension=0),
+                    slot=0xFFFF,
+                    subfile=0xFFFF,
+                    const_combined=0x200A,
+                    reserved=0,
+                    parameters=SimpleChunkParameters(1, 0),
+                    constant2=0x8000,
+                    is_placeholder=True,
+                )
+            )
+
         for _ in range(entry_count):
             entry_bytes = self._stream.read(entry_size)
             if len(entry_bytes) != entry_size:
-                raise ValueError("template index.cdb entries are truncated")
+                missing = entry_count - len(entries)
+                if missing > 0:
+                    logger.warning(
+                        "template index.cdb entries are truncated; appending %d default entries",
+                        missing,
+                    )
+                    for _ in range(missing):
+                        append_default_entry()
+                break
             (
                 packed_position,
                 slot,
@@ -628,6 +652,8 @@ class World:
 
         self.entries = {}
         for entry in self._index.entries:
+            if getattr(entry, "is_placeholder", False):
+                continue
             slot = entry.slot
             if entry.constant0 not in (0x20FF, 0x200A, 0x2014):
                 logger.warning(
