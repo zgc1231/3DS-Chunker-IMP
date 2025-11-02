@@ -11,7 +11,13 @@ from typing import Iterator
 from anvil import Chunk, ChunkNotFound, Region
 from nbt import nbt
 
-from .classes import World, parse_position
+from .classes import (
+    World,
+    parse_position,
+    build_template_position,
+    TemplateIndexEntry,
+    SimpleChunkParameters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +448,7 @@ def convert_java(world_3ds: Path, java_world: Path, delete_out: bool) -> None:
 
     writers: dict[int, CDBWriter] = {}
     missing_blocks: set[str] = set()
+    converted_entries: list[TemplateIndexEntry] = []
 
     try:
         for position, slot, subfile, index_entry in _iter_index_entries(world):
@@ -483,9 +490,32 @@ def convert_java(world_3ds: Path, java_world: Path, delete_out: bool) -> None:
                 writer = CDBWriter(Path(cdb_path))
                 writers[slot] = writer
             writer.write_subfile(subfile, chunk_bytes)
+
+            converted_entries.append(
+                TemplateIndexEntry(
+                    position=build_template_position(chunk_x, chunk_z, dimension),
+                    slot=slot,
+                    subfile=subfile,
+                    const_combined=index_entry.const_combined,
+                    reserved=index_entry.reserved,
+                    parameters=SimpleChunkParameters(
+                        index_entry.parameters.unknown0,
+                        index_entry.parameters.unknown1,
+                    ),
+                    constant2=index_entry.constant2,
+                )
+            )
     finally:
         for writer in writers.values():
             writer.close()
+
+    if converted_entries:
+        try:
+            world.index.update_entries_from_conversion(converted_entries)
+        except ValueError:
+            logger.warning(
+                "Unable to update template index entries from conversion results due to mismatched counts."
+            )
 
     if missing_blocks:
         logger.warning(

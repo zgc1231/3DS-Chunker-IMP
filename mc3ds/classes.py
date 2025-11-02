@@ -1,14 +1,16 @@
+from __future__ import annotations
+
+import logging
 import os
+import re
 import struct
+import zlib
 from abc import abstractmethod
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterable
 from types import SimpleNamespace
-import zlib
-import re
-import logging
+from typing import Any, Iterable
 
 from .nbt import NBT
 from .parser import parser
@@ -45,6 +47,20 @@ def parse_position(position) -> tuple[int, int, int]:
     # combined = entry.position  # entry.xBitfield | (entry.zBitfield << 16)
     # position = self._parse_position(combined)
     return (int(x), int(z), int(dimension))
+
+
+def build_template_position(x: int, z: int, dimension: int) -> TemplatePosition:
+    if not (0 <= dimension <= 2):
+        raise ValueError(f"invalid dimension {dimension:d}")
+
+    unsigned_size = 1 << 13
+
+    def _encode(value: int) -> int:
+        if value < 0:
+            value += unsigned_size
+        return value & 0x3FFF
+
+    return TemplatePosition(x=_encode(x), z=_encode(z), dimension=dimension)
 
 
 class BaseParser:
@@ -135,6 +151,7 @@ class Index(BaseParser):
             raise ValueError(f"unexpected constant1 value 0x{constant1:08X}")
 
         entries: list[TemplateIndexEntry] = []
+        placeholder_range: slice | None = None
 
         def append_default_entry() -> None:
             entries.append(
@@ -158,6 +175,7 @@ class Index(BaseParser):
                         "template index.cdb entries are truncated; appending %d default entries",
                         missing,
                     )
+                    placeholder_range = slice(len(entries), len(entries) + missing)
                     for _ in range(missing):
                         append_default_entry()
                 break
@@ -201,7 +219,34 @@ class Index(BaseParser):
             extra1=extra1,
             pointers=tuple(),
             entries=tuple(entries),
+            placeholder_range=placeholder_range,
         )
+
+    @property
+    def template_placeholder_range(self) -> slice | None:
+        data = getattr(self._data, "placeholder_range", None)
+        if data is not None:
+            return data
+        return None
+
+    def update_entries_from_conversion(
+        self, entries: Iterable[TemplateIndexEntry]
+    ) -> None:
+        converted_entries = list(entries)
+        expected_count = getattr(self._data, "entryCount", None)
+        if expected_count is not None and len(converted_entries) != expected_count:
+            raise ValueError(
+                "converted entry count does not match template index entry count"
+            )
+
+        self._entries = converted_entries
+        if hasattr(self._data, "entries"):
+            try:
+                self._data.entries = tuple(converted_entries)
+            except AttributeError:
+                pass
+        if hasattr(self._data, "placeholder_range"):
+            self._data.placeholder_range = None
 
     @property
     def pointers(self):
