@@ -25,8 +25,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-# according to your header notes: CDB subfile magic is 0xABCDEF98
-MAGIC_CDB = 0xABCDEF98
+# templates now use the same magic as VDB subfiles: 0xABCDEF99
+MAGIC_CDB = 0xABCDEF99
 
 # maximum allowed cdb file size before duplicating (as you specified)
 MAX_CDB_SIZE = 1310740  # 1,310,740 bytes

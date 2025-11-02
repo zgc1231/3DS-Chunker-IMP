@@ -1,4 +1,4 @@
-#define MAGIC_CDB 0xABCDEF98
+#define MAGIC_CDB 0xABCDEF99
 #define MAGIC_VDB 0xABCDEF99
 
 // the first subfile has a file header and the rest have garbage here
